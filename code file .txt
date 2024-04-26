@@ -1,0 +1,331 @@
+DESCRIPTION OF FILES:
+DUT: An adder with two 5-bit inputs and one 6-bit output. Valid_in and Valid_out signals denote the corresponding valid signals.
+
+TESTBENCH:
+
+TRANSACTION : Contains all the interface signals. Input signals declared as rand. print function included for debugging purpose.
+GENERATOR : Generates the stimulus by randomizing the transaction class. Sends the random stimulus to driver through Mailbox.
+INTERFACE : A simple interface without modport and clocking block.
+DRIVER : Receives the stimulus from generator and converts them into pin wiggles.
+MONITOR_IN : Monitors the input signals. Sends the valid inputs to scoreboard through Mailbox.
+MONITOR_OUT : Monitors the output signals. Sends the valid outputs to scoreboard through Mailbox.
+SCOREBOARD : Receives input and output transactions from monitors. Computes the expected result and compares it with DUT's output. Sends an error message if there is a mismatch.
+ENVIRONMENT : Creates generator, driver, monitors and mailboxes. For better controllability, 3 tasks were created - a) pre_test() - Calls reset method, b) test() - Calls Stimulus generation and stimulus driving. c) post_test() - Determines when to stop the test.
+TEST : Creates the environment. Sets up number of transactions to be generated. Initializes the stimulus driving.
+TESTBENCH_TOP: Generates clock. Contains DUT, TEST and Interface instances. Connects DUT and testbench.
+
+step:1 design a adder
+module adder (clock, reset, in1, in2, valid_in, out, valid_out);
+  	input clock, reset;
+  	input [4:0] in1, in2;
+  	input valid_in;
+  	output reg [5:0] out;
+  	output reg valid_out;
+  
+  	always @(posedge clock) begin
+      if (reset) begin 
+        out <= 6'b0;
+        valid_out <= 0;
+      end
+      else begin
+        out <= in1 + in2;
+        valid_out <= valid_in;
+      end
+    end
+  
+endmodule: adder
+
+step2: transaction
+class transaction;
+  rand bit [4:0] in1;
+  rand bit [4:0] in2;
+  rand bit valid_in;
+  
+  bit [5:0] out;
+  bit valid_out;
+
+  constraint c1{valid_in dist {1 := 3, 0 := 1};} 
+  
+  function void print ();
+    $display("*******Transaction*******");
+    $display("Inputs in1 = %0h, in2 = %0h, and out = %0h", in1, in2, out);
+  endfunction: print
+  
+endclass
+
+step3:generator
+`include "transaction.sv"
+
+class generator;
+  rand transaction tx;
+  mailbox gen2driv;
+  int tx_count;
+  event ended;
+  
+  function new(mailbox gen2driv);
+    this.gen2driv = gen2driv;
+  endfunction
+  
+  task main();
+    $display("[ GENERATOR ] ****** GENERATOR STARTED ******");
+    repeat(tx_count) begin
+      tx = new();
+      assert(tx.randomize());
+      gen2driv.put(tx);
+    end
+    -> ended;
+    $display("[ GENERATOR ] ****** GENERATOR ENDED ******");
+  endtask
+endclass
+
+step4:interface
+interface intf(input logic clock, reset);
+  logic valid_in;
+  logic [4:0] in1;
+  logic [4:0] in2;
+  logic [5:0] out;
+  logic valid_out;
+endinterface: intf
+  
+step5:driver
+class driver;
+  int tx_count1=0;
+  int tx_count2=0;
+  
+  virtual intf intf_vi;
+  mailbox gen2driv;
+  
+  function new(virtual intf intf_vi, mailbox gen2driv);
+    this.intf_vi = intf_vi;
+    this.gen2driv = gen2driv;
+  endfunction
+  
+  task reset;
+    wait(intf_vi.reset);
+    $display("[ DRIVER ] ****** RESET STARTED ******");
+    intf_vi.in1 <= 0;
+    intf_vi.in2 <= 0;
+    intf_vi.valid_in <= 0;
+    wait(!intf_vi.reset);
+    $display("[ DRIVER ] ****** RESET ENDED ******");
+  endtask
+  
+  task main;
+    $display("[ DRIVER ] ****** DRIVER STARTED ******");
+    forever begin
+      transaction tx;
+      gen2driv.get(tx);
+      @(posedge intf_vi.clock);
+      tx_count1++;
+      intf_vi.in1 <= tx.in1;
+      intf_vi.in2 <= tx.in2;
+      intf_vi.valid_in <= tx.valid_in;
+      if (tx.valid_in == 1'b1) tx_count2++;
+    end
+    $display("[ DRIVER ] ****** DRIVER ENDED ******");
+  endtask
+endclass
+
+step6: monitor in
+class monitor_in;
+  virtual intf vif;
+  mailbox mon_in2scb;
+  
+  function new(virtual intf vif, mailbox mon_in2scb);
+    this.vif = vif;
+    this.mon_in2scb = mon_in2scb;
+  endfunction
+  
+  task main;
+    $display("[ MONITOR_IN ] ****** MONITOR_IN STARTED ******");    
+    forever begin
+      transaction tx = new();
+      @(posedge vif.clock);
+      if(vif.valid_in) begin
+      	tx.in1 = vif.in1;
+      	tx.in2 = vif.in2;
+      	mon_in2scb.put(tx);
+      end
+    end
+    $display("[ MONITOR_IN ] ****** MONITOR_IN ENDED ******");    
+  endtask
+endclass
+
+step7:monitor_out
+class monitor_out;
+  int tx_count=0;
+  virtual intf vif;
+  mailbox mon_out2scb;
+  
+  function new(virtual intf vif, mailbox mon_out2scb);
+    this.vif = vif;
+    this.mon_out2scb = mon_out2scb;
+  endfunction
+  
+  task main;
+    $display("[ MONITOR_OUT ] ****** MONITOR_OUT STARTED ******");    
+    forever begin
+      transaction tx = new();
+      @(posedge vif.clock);
+      wait(vif.valid_out);
+      tx.out = vif.out;
+      mon_out2scb.put(tx);
+      tx_count++;
+    end
+    $display("[ MONITOR_OUT ] ****** MONITOR_OUT ENDED ******");    
+  endtask
+endclass
+
+step8:scorecard
+class scoreboard;
+  mailbox mon_in2scb;
+  mailbox mon_out2scb;
+  
+  bit [4:0] in1_fifo[$];
+  bit [4:0] in2_fifo[$]; 
+  
+  function new(mailbox mon_in2scb, mailbox mon_out2scb);
+    this.mon_in2scb  = mon_in2scb;
+    this.mon_out2scb = mon_out2scb;
+  endfunction
+  
+  task main;
+	fork 
+      get_input();
+      get_output();
+    join_none;
+  endtask
+  
+  task get_input();
+    transaction tx;
+    forever begin	
+      mon_in2scb.get(tx);
+      in1_fifo.push_back(tx.in1);
+      in2_fifo.push_back(tx.in2);
+      //$display("Inputs received at SCOREBOARD = %0d, %0d", tx.in1, tx.in2);  
+    end
+  endtask
+  
+  task get_output();
+    transaction tx;
+    bit [4:0] a, b;
+    forever begin
+      mon_out2scb.get(tx);
+      //$display("Outputs received at SCOREBOARD = %0d", tx.out);  
+      a = in1_fifo.pop_front();
+      b = in2_fifo.pop_front();
+      if((a+b) != tx.out)
+        $error("Wrong Result --- Inputs = %0d and %0d --- Output = %0d", a, b, tx.out);
+    end
+  endtask
+    
+endclass
+
+step9:env
+//`include "transaction.sv"
+`include "generator.sv"
+`include "driver.sv"
+`include "monitor_in.sv"
+`include "monitor_out.sv"
+`include "scoreboard.sv"
+
+class environment;
+  generator gen;
+  driver driv;
+  monitor_in mon_in;
+  monitor_out mon_out;
+  scoreboard scb;
+  
+  mailbox gen2driv;
+  mailbox mon_in2scb;
+  mailbox mon_out2scb;
+  
+  virtual intf vif;
+  
+  function new(virtual intf vif);
+    this.vif = vif;
+    
+    gen2driv = new();
+    mon_in2scb = new();
+    mon_out2scb = new();
+
+    gen = new(gen2driv);
+    driv = new(vif, gen2driv);
+    mon_in = new(vif, mon_in2scb);
+    mon_out = new(vif, mon_out2scb);
+    scb = new(mon_in2scb, mon_out2scb);
+  endfunction
+  
+  task pre_test();
+    driv.reset();
+  endtask
+  
+  task test();
+    fork
+      gen.main();
+      driv.main();
+      mon_in.main();
+      mon_out.main();
+      scb.main();
+    join_any
+  endtask
+  
+  task post_test;
+    wait(gen.ended.triggered);
+    wait(gen.tx_count == driv.tx_count1);
+    wait(driv.tx_count2 == mon_out.tx_count);
+  endtask
+  
+  task run;
+    pre_test();
+    test();
+    post_test();
+    do ;
+    while (0);
+    $display ("TOTAL OF %0d transactions has been sent, of which %0d are valid (valid_in high)", gen.tx_count, driv.tx_count2);
+    $finish;
+  endtask
+endclass
+
+step10:test
+`include "env.sv"
+program test(intf intf);
+  environment env;
+  
+  initial begin
+    env = new(intf);
+    
+    
+    env.gen.tx_count = 100;
+    
+    env.run();
+  end
+endprogram
+
+TESTBENCH:
+`include "interface.sv"
+`include "test.sv"
+
+module testbench_top;
+  bit clock;
+  bit reset;
+  
+  initial begin
+    clock = 0;
+    reset = 1;
+    #10 reset = 0;
+  end
+  
+  always #5 clock = ~clock;
+  
+  intf intf_top(clock, reset);
+  
+  test test(intf_top);
+  
+  adder DUT(intf_top.clock, intf_top.reset, intf_top.in1, intf_top.in2, intf_top.valid_in, intf_top.out, intf_top.valid_out);
+  
+  initial begin
+    $dumpfile("dump.vcd");
+    $dumpvars(0);
+  end
+endmodule
